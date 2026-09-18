@@ -1,74 +1,54 @@
-Markdown
+# Whisper SaaS Speech-to-Text API
 
-# 🎙️ Whisper Enterprise Pro API Service
+Bu proje, [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2 tabanlı Whisper implementasyonu) kullanan, GPU üzerinde çalışan, SQLite ile API anahtarı doğrulaması yapan bir ses-metin dönüşümü (transkripsiyon) REST API servisidir. Girdi olarak bir ses dosyası alır; çıktı olarak tam metni, kelime bazlı zaman damgalarını (`start`/`end`) ve model güven skorlarını (`probability`) döner.
 
-Bu proje, NVIDIA GPU (RTX 4000) destekli, dinamik API anahtarı yönetimi ve işlem kuyruğu özelliklerine sahip profesyonel bir ses-metin dönüşümü (Transcription) servisidir.
+## Mimari
 
-## 🚀 Öne Çıkan Özellikler
+Depo iki ayrı çalışma modu içerir:
 
-* **Dinamik API Key Yönetimi**: Kullanıcılar kendi anahtarlarını `/generate-key` endpoint'i üzerinden oluşturur; anahtarlar SQLite veritabanında güvenle saklanır.
-* **GPU İşlem Kuyruğu (Task Queue)**: `asyncio.Lock` mekanizması sayesinde aynı anda gelen çoklu istekler sıraya alınır ve GPU'nun aşırı yüklenmesi/çökmesi engellenir.
-* [cite_start]**Gelişmiş JSON Çıktısı**: Yanıtlar sadece tam metni değil, kelime bazlı zaman damgalarını (start/end) ve modelin doğruluk skorlarını (probability) içerir. [cite: 1-8]
-* **Lazy Loading Model Desteği**: `tiny`, `medium` ve `large` modelleri sadece ilk talep edildiklerinde GPU belleğine yüklenerek kaynak tasarrufu sağlar.
-* **WebSocket Desteği**: `/ws/{api_key}` üzerinden gerçek zamanlı, düşük gecikmeli canlı deşifre imkanı sunar.
+- **`main_api.py`** — FastAPI tabanlı HTTP servisi ve uygulamanın giriş noktası (`uvicorn` ile `0.0.0.0:3333` üzerinde çalışır). API anahtarı doğrulaması, model yönetimi ve GPU kuyruğu mantığı burada yer alır.
+- **`speechtotext.py`** — Bağımsız, komut satırından çalıştırılan bir gerçek-zamanlı mikrofon deşifre betiği (`sounddevice` ile ses yakalar, `faster-whisper` ile anlık transkripsiyon yapıp `konusma_kayitlari.txt` dosyasına yazar). API servisinin bir parçası değildir, ayrı bir araçtır.
+- **`database.py`** — SQLite (`users.db`) üzerinde `users` tablosunu yönetir: `generate_new_key()` her kullanıcı için `tk_` önekli, `secrets.token_urlsafe(32)` ile üretilmiş benzersiz bir API anahtarı oluşturur; `validate_key()` gelen anahtarı sorgulayıp kullanıcı adını döner. Modül import edildiğinde `users.db` yoksa otomatik olarak oluşturulur.
 
----
+### GPU Kuyruğu
 
-## 🛠️ Kurulum ve Çalıştırma
+`main_api.py` içinde global bir `asyncio.Lock()` (`gpu_lock`) tanımlıdır. `/transcribe` endpoint'ine gelen her istek bu kilidi bekler; aynı anda yalnızca bir istek GPU üzerinde işlenir, diğerleri sırada bekler. Yanıt gövdesinde isteğin ne kadar süre kuyrukta beklediği (`queue_wait_time`) ve fiili işlem süresi (`processing_time`) ayrı ayrı raporlanır. Bu, tek GPU'lu bir ortamda modelin aynı anda birden fazla istekle çakışıp bellek taşırmasını (OOM) engellemek için kullanılan basit bir sıralama mekanizmasıdır; gerçek bir kuyruk/worker sistemi (Celery, Redis vb.) değildir — istekler süreç içinde art arda işlenir.
 
-### 1. Sistem Bağımlılıkları
-Ubuntu üzerinde NVIDIA sürücülerinin ve FFmpeg'in yüklü olması gerekir:
-```bash
-sudo apt update && sudo apt install ffmpeg python3-pip -y
-2. Bağımlılıkların Yüklenmesi
-Bash
+Whisper modelleri **lazy loading** ile yüklenir: `get_model()` fonksiyonu istenen `model_type` (`tiny`, `medium`, `large` vb.) ilk kez talep edildiğinde `WhisperModel(..., device="cuda", compute_type="int8_float16")` ile GPU belleğine yüklenir ve `loaded_models` sözlüğünde önbelleğe alınır; sonraki isteklerde tekrar yüklenmez.
 
-python3 -m venv my_model_env
-source my_model_env/bin/activate
-pip install fastapi uvicorn faster-whisper jinja2 python-multipart websockets
-3. Servisi Başlatma
-Bash
+## Kurulum ve Çalıştırma (Docker)
 
-python main_api.py
-🖥️ Kullanım Rehberi
-API Anahtarı Alın: POST http://localhost:3333/generate-key?username=tuncay
+`Dockerfile`, `nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04` temel imajı üzerine Python 3.10, `ffmpeg` ve `requirements.txt` bağımlılıklarını kurar; `main_api.py`, `database.py` ve `templates/` klasörünü kopyalar, `3333` portunu açar ve konteyneri `python3 main_api.py` ile başlatır.
 
-Dosya Gönderin: Header'a x-api-key bilginizi ekleyerek /transcribe endpoint'ine ses dosyası yükleyin.
-
-Performans İzleme: Yanıt içerisindeki queue_wait_time ile isteğinizin kuyrukta ne kadar beklediğini görebilirsiniz.
-
-📂 Proje Yapısı
-main_api.py: API logic ve GPU kilit yönetimi.
-
-database.py: SQLite veritabanı ve kullanıcı yetkilendirme işlemleri.
-
-users.db: API anahtarlarının saklandığı veritabanı (Otomatik oluşturulur).
-
-🛡️ Güvenlik
-users.db dosyası hassas veriler içerdiği için .gitignore dosyasına eklenmiştir. Üretim ortamında API anahtarlarınızı kimseyle paylaşmayın.
-
-
-
-
----
-
-### 2. GitHub Commit ve Push Komutları
-
-Şimdi hazırladığımız tüm dosyaları (özellikle `database.py` ve yeni `README.md`) GitHub repona göndermek için terminalde şu komutları sırasıyla çalıştır:
+`docker-compose.yml`:
 
 ```bash
-cd /home/tuncay/Projects
+docker compose up --build
+```
 
-# 1. Önce veritabanı dosyasının git'e gitmesini engelleyelim
-echo "users.db" >> .gitignore
-echo "__pycache__/" >> .gitignore
-echo "my_model_env/" >> .gitignore
+Notlar:
+- **GPU desteği zorunludur.** Compose dosyası `deploy.resources.reservations.devices` ile `nvidia` sürücüsünü ve tüm GPU'ları (`count: all`) talep eder; host makinede NVIDIA sürücüleri ve [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit) kurulu olmalıdır. `main_api.py` doğrudan `device="cuda"` kullanır ve CPU'ya otomatik geri dönüş (fallback) içermez — GPU olmadan başarısız olur.
+- `./users.db` ve `./kayitlar/` klasörleri konteynere bind-mount edilir; böylece API anahtarları ve kayıtlar konteyner yeniden başlatıldığında/silindiğinde kaybolmaz.
+- `restart: always` ile servis konteyner/host yeniden başlatıldığında otomatik ayağa kalkar.
 
-# 2. Tüm yeni ve güncellenmiş dosyaları ekle
-git add main_api.py database.py README.md .gitignore templates/index.html
+## Ortam Değişkenleri / Konfigürasyon
 
-# 3. Commit mesajını oluştur
-git commit -m "Final: Dinamik API Key, SQLite veritabanı ve GPU işlem kuyruğu eklendi"
+Servis için tanımlı bir ortam değişkeni veya `.env` dosyası bulunmuyor; tüm ayarlar (port `3333`, dil `tr`, `compute_type="int8_float16"` vb.) kod içinde sabit (hardcoded) değerlerdir. Yalnızca `speechtotext.py` (bağımsız betik) içinde, `cudnn` kütüphane yolu bulunamazsa `LD_LIBRARY_PATH` değişkenine manuel bir yol eklenir; bu, Docker akışını etkilemez.
 
-# 4. GitHub'a gönder
-git push
+## API Kullanımı
+
+| Endpoint | Metot | Açıklama |
+|---|---|---|
+| `/generate-key?username=<ad>` | `POST` | Verilen kullanıcı adı için yeni bir API anahtarı (`tk_...`) üretir ve SQLite'a kaydeder. Kullanıcı adı zaten kayıtlıysa `400` döner. |
+| `/transcribe` | `POST` | `multipart/form-data` ile ses dosyası (`file`) alır; opsiyonel `model_type` (varsayılan `medium`) query parametresi ile model boyutu seçilir. `x-api-key` header'ı zorunludur (`database.validate_key` ile doğrulanır); eksikse `401`, geçersizse `403` döner. Yanıt: `text`, `model`, `user`, `queue_wait_time`, `processing_time`, `words` (kelime bazlı zaman damgası ve olasılık listesi). |
+
+`templates/index.html`, tarayıcıdan mikrofonla `ws://.../ws/<api_key>` adresine bağlanıp canlı deşifre gösteren bir demo arayüzüdür. **Ancak `main_api.py` içinde şu an bir `/ws/...` WebSocket endpoint'i tanımlı değildir** (kod yalnızca `WebSocket`/`Request`/`Jinja2Templates` gibi sınıfları import eder ama kullanmaz); bu şablon dosyası herhangi bir route tarafından servis edilmiyor ve gerçek zamanlı WebSocket akışı henüz uygulanmamıştır.
+
+## Bilinen Sınırlamalar
+
+- Gerçek zamanlı WebSocket transkripsiyonu (`templates/index.html`'in beklediği `/ws/{api_key}`) API'de henüz uygulanmamıştır.
+- `/generate-key` endpoint'i herhangi bir yetkilendirme gerektirmez; isteyen herkes yeni bir API anahtarı oluşturabilir — üretim ortamı için bir admin koruması eklenmesi gerekir.
+- Tek `asyncio.Lock` tüm istekleri sıraya aldığından, isteklerin tamamı sıralı (seri) işlenir; çoklu GPU veya paralel işlem desteği yoktur.
+- `main_api.py` içinde `device="cuda"` sabittir; CPU fallback yalnızca bağımsız `speechtotext.py` betiğinde mevcuttur, API servisinde yoktur.
+- Transkripsiyon dili kod içinde `language="tr"` olarak sabitlenmiştir, dinamik dil seçimi yoktur.
+- `users.db` dosyası hassas veriler içerdiği için `.gitignore`'da hariç tutulmuştur; üretim ortamında API anahtarlarını paylaşmayın.
